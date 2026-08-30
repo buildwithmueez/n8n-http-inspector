@@ -59,11 +59,6 @@ export function diffCalls(
     fields.push(scalar("Error", a.error ?? "", b.error ?? ""));
   }
 
-  // Filter: only show fields where at least one side has content OR they differ
-  const relevant = fields.filter(
-    (f) => f.status !== "unchanged" || (f.left !== "" && f.left === f.right)
-  );
-
   // For cleaner display, always include key fields even if unchanged
   const KEY_LABELS = new Set(["Method", "URL", "Status", "Duration"]);
   const shown = fields.filter(

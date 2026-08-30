@@ -66,7 +66,15 @@ function decodeN8nData(raw: string): unknown {
       if (seen.has(val)) return null;
       const next = new Set(seen);
       next.add(val);
-      return resolve(table[parseInt(val, 10)], next);
+      const entry = table[parseInt(val, 10)];
+      // flatted stores terminal strings directly in the table — they must NOT
+      // be re-resolved as further references. Only objects/arrays can contain
+      // more references. Without this guard, a string value like "30" stored
+      // at table[2] would be followed as a reference to table[30] (undefined).
+      if (entry === null || entry === undefined || typeof entry !== "object") {
+        return entry;
+      }
+      return resolve(entry, next);
     }
     if (Array.isArray(val)) return val.map((v) => resolve(v, seen));
     if (val !== null && typeof val === "object") {
@@ -346,36 +354,65 @@ function extractHeadersFromNodeParams(params: Record<string, unknown>): Record<s
 }
 
 function extractBodyFromNodeParams(params: Record<string, unknown>): string | null {
-  // Raw string body (JSON mode, raw mode, or pre-stringified body)
-  if (typeof params.body === "string" && params.body.trim()) {
-    return params.body;
+  // If n8n says no body is being sent, don't guess from stale leftover fields.
+  if (params.sendBody === false) return null;
+
+  // n8n's HTTP Request node uses `specifyBody` (or the older `contentType`) to
+  // indicate which body mode is active. Read only from the matching field so
+  // we don't accidentally pick up stale data left over from a previously-
+  // selected mode.
+  //
+  // Confirmed field names from n8n community posts (2025-2026):
+  //   specifyBody: "json"       → jsonBody contains the raw JSON string
+  //   specifyBody: "keypairs"   → bodyParameters.parameters[] contains {name,value}
+  //   specifyBody: "string"     → body contains a plain string
+  //   contentType: "raw"        → body contains the raw value (older node versions)
+  //   contentType: "json"       → body contains JSON string (older versions)
+
+  const mode = (params.specifyBody as string | undefined)
+    ?? (params.contentType as string | undefined)
+    ?? (params.bodyContentType as string | undefined);
+
+  if (mode === "json") {
+    // Explicit JSON mode — jsonBody is authoritative
+    if (typeof params.jsonBody === "string" && params.jsonBody.trim()) {
+      return params.jsonBody;
+    }
+    // Fall through: some versions store it in body even in json mode
   }
 
-  // jsonBody: n8n stores raw JSON string here when "JSON" body type is used
-  if (typeof params.jsonBody === "string" && params.jsonBody.trim()) {
-    return params.jsonBody;
+  if (mode === "keypairs" || mode === "multipart-form-data" || mode === "form-urlencoded") {
+    // Key-value pairs mode — convert [{name,value}] to flat object
+    return extractKeypairBody(params.bodyParameters);
   }
 
-  // body as an object (some versions store it parsed)
+  if (mode === "string" || mode === "raw") {
+    // Raw string body — use body field directly
+    if (typeof params.body === "string") return params.body;
+  }
+
+  // No mode field (older node versions) or mode not recognised:
+  // fall back through the priority order, but now only touch each field
+  // when it actually has content, to reduce the chance of stale-data hits.
+  if (typeof params.body === "string" && params.body.trim()) return params.body;
+  if (typeof params.jsonBody === "string" && params.jsonBody.trim()) return params.jsonBody;
   if (params.body && typeof params.body === "object") {
     return JSON.stringify(params.body, null, 2);
   }
-
-  // bodyParameters: n8n's key-value parameter UI stores body as
-  //   { parameters: [{ name: "key", value: "val" }, ...] }
-  // We convert this to a flat { key: val } JSON object — the actual shape
-  // that n8n serializes and sends over the wire.
-  if (params.bodyParameters && typeof params.bodyParameters === "object") {
-    const bp = params.bodyParameters as Record<string, unknown>;
-    const pairs = bp.parameters as Array<{ name: string; value: unknown }> | undefined;
-    if (Array.isArray(pairs) && pairs.length > 0) {
-      const obj: Record<string, unknown> = {};
-      for (const { name, value } of pairs) {
-        if (name) obj[name] = value ?? "";
-      }
-      return JSON.stringify(obj, null, 2);
-    }
-  }
+  const kpResult = extractKeypairBody(params.bodyParameters);
+  if (kpResult) return kpResult;
 
   return null;
+}
+
+function extractKeypairBody(bodyParameters: unknown): string | null {
+  if (!bodyParameters || typeof bodyParameters !== "object") return null;
+  const bp = bodyParameters as Record<string, unknown>;
+  const pairs = bp.parameters as Array<{ name: string; value: unknown }> | undefined;
+  if (!Array.isArray(pairs) || pairs.length === 0) return null;
+  const obj: Record<string, unknown> = {};
+  for (const { name, value } of pairs) {
+    if (name) obj[name] = value ?? "";
+  }
+  return Object.keys(obj).length > 0 ? JSON.stringify(obj, null, 2) : null;
 }

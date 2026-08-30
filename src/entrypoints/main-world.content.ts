@@ -22,8 +22,8 @@ export default defineContentScript({
     //   /rest/executions/123
     //   /rest/executions/123?includeData=true
     //   /api/v1/executions/123
-    // Must NOT match the list endpoint /rest/executions (no id segment after it)
-    const EXECUTION_URL_RE = /\/executions\/([a-zA-Z0-9_-]+)/;
+    // Must NOT match sub-paths like /rest/executions/123/retry or /rest/executions/123/logs
+    const EXECUTION_URL_RE = /\/executions\/([a-zA-Z0-9_-]+)(\?|$)/;
 
     function isExecutionDetailUrl(url: string): boolean {
       return EXECUTION_URL_RE.test(url);

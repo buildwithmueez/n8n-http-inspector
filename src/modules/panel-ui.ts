@@ -453,16 +453,37 @@ export class InspectorPanel {
         redacted = true;
         redactBtn.textContent = "✓ Redacted";
         redactBtn.disabled = true;
-        // Replace header values in the rendered header sections
-        container.querySelectorAll<HTMLElement>(".ni-hn").forEach((el) => {
-          const nameEl = el as HTMLElement;
+
+        // ── Redact header values ─────────────────────────────────────────
+        container.querySelectorAll<HTMLElement>(".ni-hn").forEach((nameEl) => {
           const valEl = nameEl.nextElementSibling as HTMLElement | null;
           if (!valEl) return;
-          const name = nameEl.textContent ?? "";
           const val = valEl.textContent ?? "";
           const redactedVal = redactString(val);
           if (redactedVal !== val) valEl.textContent = redactedVal;
         });
+
+        // ── Redact response body: re-render from redacted raw string ─────
+        // bodyStr is captured in this closure. We find the section we marked
+        // with data-ni-section="Response Body" and replace its <pre> element
+        // with a freshly-highlighted version of the redacted string.
+        if (bodyStr) {
+          const bodySectionEl = container.querySelector<HTMLElement>(
+            '[data-ni-section="Response Body"] .ni-sb'
+          );
+          if (bodySectionEl) {
+            const redactedBody = redactString(bodyStr);
+            const newPre = highlightCodeEl(redactedBody);
+            // Replace existing content — the section body holds exactly one child
+            bodySectionEl.innerHTML = "";
+            bodySectionEl.appendChild(newPre);
+            // Also update the copy button's data so the copy reflects redacted text
+            const copyBtn = container.querySelector<HTMLElement>(
+              '[data-ni-section="Response Body"] .ni-copy-btn'
+            );
+            if (copyBtn) copyBtn.dataset.copy = redactedBody;
+          }
+        }
       });
       warn.appendChild(redactBtn);
       container.appendChild(warn);
@@ -528,7 +549,9 @@ export class InspectorPanel {
     }
 
     if (bodyStr) {
-      container.appendChild(this.sectionEl("Response Body", highlightCodeEl(bodyStr), bodyStr));
+      const bodySec = this.sectionEl("Response Body", highlightCodeEl(bodyStr), bodyStr);
+      bodySec.dataset.niSection = "Response Body";
+      container.appendChild(bodySec);
     } else if (!call.error) {
       const naEl = document.createElement("span");
       naEl.className = "ni-na";
@@ -731,18 +754,28 @@ export class InspectorPanel {
       label.className = "ni-diff-label";
       label.textContent = field.label;
 
+      // Redact secrets in body and header fields before display.
+      // Header fields are labelled "Req Header: <name>" / "Res Header: <name>".
+      // Body fields are labelled "Request Body" / "Response Body".
+      const isSecret = field.label.startsWith("Req Header:") ||
+        field.label.startsWith("Res Header:") ||
+        field.label === "Request Body" ||
+        field.label === "Response Body";
+      const leftText  = isSecret ? redactString(field.left)  : field.left;
+      const rightText = isSecret ? redactString(field.right) : field.right;
+
       const left = document.createElement("div");
       left.className = "ni-diff-cell ni-diff-cell--a";
       const leftPre = document.createElement("pre");
       leftPre.className = "ni-diff-val";
-      leftPre.textContent = field.left || "(empty)";
+      leftPre.textContent = leftText || "(empty)";
       left.appendChild(leftPre);
 
       const right = document.createElement("div");
       right.className = "ni-diff-cell ni-diff-cell--b";
       const rightPre = document.createElement("pre");
       rightPre.className = "ni-diff-val";
-      rightPre.textContent = field.right || "(empty)";
+      rightPre.textContent = rightText || "(empty)";
       right.appendChild(rightPre);
 
       row.append(label, left, right);
