@@ -53,27 +53,33 @@ export default defineContentScript({
 // ---------------------------------------------------------------------------
 
 function isN8nPage(): boolean {
-  const href = location.href;
   const hostname = location.hostname;
-  const title = document.title.toLowerCase();
 
+  // ── Strong signals (unambiguous) ────────────────────────────────────────
+
+  // n8n Cloud official domain
   if (hostname.endsWith(".app.n8n.cloud")) return true;
-  if (href.includes("/workflow/") || href.includes("/workflows")) return true;
-  if (href.includes("/executions")) return true;
-  if (title.includes("n8n")) return true;
 
+  // n8n injects these globals on every page of the editor
   const win = window as Record<string, unknown>;
   if (win.n8nVersion !== undefined) return true;
   if (win.n8nBaseUrl !== undefined) return true;
 
+  // ── DOM signals (only checked after a 2s delay, so DOM is settled) ──────
+
+  // n8n's Vue app root sets data-n8n on #app
   const appEl = document.getElementById("app");
-  if (appEl) {
-    if (appEl.dataset.n8n !== undefined) return true;
-    for (const meta of Array.from(document.querySelectorAll("meta"))) {
-      const content = (meta.getAttribute("content") ?? "").toLowerCase();
-      const name = (meta.getAttribute("name") ?? "").toLowerCase();
-      if (content.includes("n8n") || name.includes("n8n")) return true;
-    }
+  if (appEl?.dataset.n8n !== undefined) return true;
+
+  // n8n sets a <meta name="n8n-*"> tag on its pages
+  for (const meta of Array.from(document.querySelectorAll("meta[name]"))) {
+    if ((meta.getAttribute("name") ?? "").toLowerCase().startsWith("n8n-")) return true;
+  }
+
+  // n8n's frontend emits a specific stylesheet or script identifier in the DOM
+  // (check for n8n-specific CSS class that only the editor renders)
+  if (document.querySelector(".n8n-tooltip, .el-button--primary[data-test-id], [data-test-id='workflow-canvas']")) {
+    return true;
   }
 
   return false;
