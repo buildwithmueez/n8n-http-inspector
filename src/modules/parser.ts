@@ -346,8 +346,36 @@ function extractHeadersFromNodeParams(params: Record<string, unknown>): Record<s
 }
 
 function extractBodyFromNodeParams(params: Record<string, unknown>): string | null {
-  if (params.body) return stringifyBody(params.body);
-  if (params.bodyParameters) return stringifyBody(params.bodyParameters);
-  if (params.jsonBody) return stringifyBody(params.jsonBody);
+  // Raw string body (JSON mode, raw mode, or pre-stringified body)
+  if (typeof params.body === "string" && params.body.trim()) {
+    return params.body;
+  }
+
+  // jsonBody: n8n stores raw JSON string here when "JSON" body type is used
+  if (typeof params.jsonBody === "string" && params.jsonBody.trim()) {
+    return params.jsonBody;
+  }
+
+  // body as an object (some versions store it parsed)
+  if (params.body && typeof params.body === "object") {
+    return JSON.stringify(params.body, null, 2);
+  }
+
+  // bodyParameters: n8n's key-value parameter UI stores body as
+  //   { parameters: [{ name: "key", value: "val" }, ...] }
+  // We convert this to a flat { key: val } JSON object — the actual shape
+  // that n8n serializes and sends over the wire.
+  if (params.bodyParameters && typeof params.bodyParameters === "object") {
+    const bp = params.bodyParameters as Record<string, unknown>;
+    const pairs = bp.parameters as Array<{ name: string; value: unknown }> | undefined;
+    if (Array.isArray(pairs) && pairs.length > 0) {
+      const obj: Record<string, unknown> = {};
+      for (const { name, value } of pairs) {
+        if (name) obj[name] = value ?? "";
+      }
+      return JSON.stringify(obj, null, 2);
+    }
+  }
+
   return null;
 }

@@ -1,9 +1,12 @@
 /**
  * curl.ts — Generate a copy-paste curl command from a captured HTTP call.
  *
- * Uses whatever data we have: method, url, headers, body.
- * When data is from node parameters (not $request meta) we add a comment
- * noting that headers/body may not reflect runtime-resolved values.
+ * Body handling:
+ *  - If $request meta is present (runtime data): use verbatim
+ *  - If body comes from node parameters: parser.ts has already converted
+ *    n8n's bodyParameters [{name,value}] pairs to a flat JSON object,
+ *    so we can serialize that directly
+ *  - Content-Type is inferred from the body shape when not explicitly set
  */
 
 import type { HttpNodeCall } from "./parser";
@@ -14,49 +17,61 @@ export function buildCurlCommand(call: HttpNodeCall): string {
   const method = call.method?.toUpperCase() ?? "GET";
   const url = call.url ?? "<URL not captured>";
 
-  // Opening line
-  lines.push(`curl -X ${method} \\`);
-  lines.push(`  '${escapeSingleQuote(url)}' \\`);
+  // Normalise content-type lookup (headers may have any casing)
+  const ctKey = call.requestHeaders
+    ? Object.keys(call.requestHeaders).find((k) => k.toLowerCase() === "content-type")
+    : undefined;
+  const contentType = ctKey ? call.requestHeaders![ctKey] : undefined;
 
-  // Headers
+  lines.push(`curl -X ${method} \\`);
+  lines.push(`  '${esc(url)}' \\`);
+
+  // Headers — emit explicit content-type first if not already in the map
+  let addedContentType = false;
   if (call.requestHeaders) {
     for (const [k, v] of Object.entries(call.requestHeaders)) {
-      lines.push(`  -H '${escapeSingleQuote(k)}: ${escapeSingleQuote(v)}' \\`);
+      lines.push(`  -H '${esc(k)}: ${esc(v)}' \\`);
+      if (k.toLowerCase() === "content-type") addedContentType = true;
     }
   }
 
   // Body
   if (call.requestBody) {
     const trimmed = call.requestBody.trim();
-    // Detect if JSON so we can set content-type hint
-    const isJson = trimmed.startsWith("{") || trimmed.startsWith("[");
-    if (isJson && !call.requestHeaders?.["content-type"] && !call.requestHeaders?.["Content-Type"]) {
+    const bodyIsJson = isJson(trimmed);
+
+    // Add Content-Type if missing and body is JSON
+    if (!addedContentType && bodyIsJson && !contentType) {
       lines.push(`  -H 'Content-Type: application/json' \\`);
     }
-    // Use --data-raw to avoid @ interpretation
-    lines.push(`  --data-raw '${escapeSingleQuote(trimmed)}' \\`);
+
+    lines.push(`  --data-raw '${esc(trimmed)}' \\`);
   }
 
-  // Remove trailing backslash from last line
+  // Remove trailing backslash
   const last = lines[lines.length - 1];
   lines[lines.length - 1] = last.endsWith(" \\") ? last.slice(0, -2) : last;
 
   let cmd = lines.join("\n");
 
-  // Add caveat comment when we only have static node params
-  const hasRuntimeData = !!(call.requestHeaders || call.requestBody);
-  const fromStaticParams = !hasRuntimeData && !!(call.method || call.url);
-  if (fromStaticParams || !call.requestHeaders) {
+  // Caveat when data is from static node params (not runtime-captured)
+  const fromStaticParams = !call.requestHeaders;
+  if (fromStaticParams) {
     cmd =
-      "# Note: request headers/body come from node parameters.\n" +
-      "# Runtime-resolved expressions may differ.\n" +
+      "# Note: body/headers come from static node parameters.\n" +
+      "# Runtime-resolved expressions (={{ ... }}) will differ.\n" +
       cmd;
   }
 
   return cmd;
 }
 
-function escapeSingleQuote(s: string): string {
-  // In shell single-quoted strings, ' must be replaced with '\''
+function isJson(s: string): boolean {
+  if (!s.startsWith("{") && !s.startsWith("[")) return false;
+  try { JSON.parse(s); return true; } catch { return false; }
+}
+
+function esc(s: string): string {
+  // Shell single-quote escaping: ' → '\''
   return s.replace(/'/g, `'\\''`);
 }
