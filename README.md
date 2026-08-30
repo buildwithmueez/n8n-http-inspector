@@ -1,14 +1,51 @@
 # n8n HTTP Inspector
 
-A Chrome extension that surfaces HTTP Request node call details directly inside the n8n editor — request method, URL, headers, body, response status, response body, and execution timing. All the stuff n8n's built-in UI buries or omits.
+A Chrome extension that surfaces HTTP Request node call details directly inside the n8n editor — request method, URL, headers, body, response status, response body, execution timing, and more. All the stuff n8n's built-in UI buries or omits.
+
+**Current version:** 2.0.0
 
 ---
 
 ## Why this exists
 
-n8n's HTTP Request nodes run **server-side**. The browser's DevTools Network tab won't show those calls. What the browser *does* see is n8n's frontend fetching execution result JSON from its own REST API after a run. This extension intercepts that response, parses out the HTTP Request node data, and renders it in a floating panel inside the n8n editor page.
+n8n's HTTP Request nodes run **server-side**. The browser's DevTools Network tab will never show those calls. What the browser *does* see is n8n's frontend fetching execution result JSON from its own REST API after a run. This extension intercepts that response, decodes n8n's internal serialization format, parses out the HTTP Request node data, and renders it in a floating panel directly inside the n8n editor.
 
 No data leaves your browser. No backend. No account required.
+
+---
+
+## Features
+
+### Core
+- **Floating panel** — draggable, resizable from all 8 edges/corners, position saved across navigation
+- **Results stack** across executions — run a workflow 3 times and see all 3 runs labelled `#1`, `#2`, `#3`
+- **Syntax-highlighted JSON and XML** — token-based One Dark colorscheme (keys, strings, numbers, booleans, tags, attributes)
+- **Collapsible sections** — every field group (Request Headers, Request Body, Response Headers, Response Body) expands/collapses individually
+- **Search / filter** — live filter across all captured calls by node name, URL, method, or status code
+- **Clear all** button and `Alt+H` keyboard shortcut to toggle panel
+
+### v2 Features
+
+**Copy as cURL**  
+One-click converts any captured call into a ready-to-paste `curl` command. Handles shell escaping, adds `Content-Type` hints for JSON bodies, and notes when values come from static node parameters rather than runtime-resolved expressions.
+
+**Automatic error diagnosis**  
+For every failed call, the panel surfaces a plain-English explanation and an n8n-specific fix. Examples:
+- `401 Bearer Token` → "Check the token hasn't expired. Decode at jwt.io to confirm exp…"
+- `429 Rate Limited` → reads your `Retry-After` header and tells you exactly how long to wait
+- `ECONNREFUSED` → "Check the URL and port are correct, and that the server is running from your n8n host"
+- Covers 20+ failure patterns: DNS failures, TLS errors, socket resets, 400/403/404/405/409/422/500/502/503/504, and more
+
+**Cross-execution diff**  
+Click the ⇄ icon to enter diff mode. Checkboxes appear on each card. Select any two runs — from the same execution or different ones — to see a side-by-side comparison of method, URL, status, duration, all request/response headers, and request/response body. JSON bodies are normalised before comparison so whitespace differences don't show as changes. Rows are colour-coded: changed (yellow), added (green), removed (red), unchanged (dimmed).
+
+**Secret / token redaction warnings**  
+Before you screenshot the panel to share in Discord or Reddit, the extension flags anything that looks like a credential:
+- Authorization headers (Bearer, Basic)
+- API key headers (`x-api-key`, `x-auth-token`, etc.)
+- Known secret prefixes (`sk-`, `ghp_`, `xoxb-`, `ey…` JWTs, `ya29.` Google tokens, etc.)
+- High-entropy strings in response bodies
+A "Redact secrets in view" button replaces flagged values in-place so your screenshot is safe to share.
 
 ---
 
@@ -31,68 +68,67 @@ Works automatically. Just install and run a workflow.
 
 1. Open any workflow in the n8n editor
 2. Click **Execute workflow** (or open a past execution from the Executions tab)
-3. The inspector panel appears automatically in the bottom-right corner
-4. Each HTTP Request node run shows as a collapsible card
-5. Toggle the panel anytime with the **⚡ button** (bottom-right) or `Alt+H`
+3. The inspector panel appears automatically — or toggle it with the **⚡ button** (bottom-right)
+4. Each HTTP Request node run appears as a collapsible card
+5. Expand a card to see URL, status, body, timing, and the cURL command
 
 ### Panel controls
 
 | Control | Action |
 |---|---|
 | Drag header | Move the panel |
-| Drag any edge or corner | Resize |
-| 🗑 button | Clear all accumulated results |
+| Drag any edge/corner | Resize |
+| ⇄ button | Toggle diff mode |
+| 🗑 button | Clear all results |
 | ✕ button | Close panel |
-| Search bar | Filter by node name, URL, method, or status code |
 | `Alt+H` | Toggle panel open/closed |
+| Search bar | Filter by name, URL, method, or status |
 
-Results **stack across executions** — running a workflow three times shows all three runs, labelled `#1`, `#2`, `#3`. The panel only resets on a full page reload.
+Results **stack across executions** — cleared only on a full page reload or by clicking the trash button.
 
 ---
 
 ## What data is available
 
-This is the most important thing to understand before using the extension.
+This is the most important thing to understand.
 
-### Always available (no node configuration needed)
+### Always available
 
 | Field | Notes |
 |---|---|
+| Response body | The output of the HTTP Request node — what n8n received and stored |
 | Node name | As labelled in the workflow |
-| Execution time | Per-node duration in milliseconds |
+| Execution time | Per-node duration in ms |
 | Execution status | `success`, `error`, etc. |
-| Response body | The output items from the node — what n8n received |
 
-### Available from static node parameters (not expression-resolved)
+### Available from static node parameters
 
-If you use hardcoded values (not `={{ $json.url }}` expressions), the extension reads these from the node's saved configuration:
+If you use hardcoded values (not expressions), the extension reads them from the saved node config:
 
 | Field | Notes |
 |---|---|
 | Request method | GET, POST, PUT, etc. |
-| Request URL | Only the static value — expressions show as the literal expression string |
+| Request URL | Static value only — `={{ expressions }}` show as their literal string |
 
-### Available only with node settings enabled
+### Requires node settings to be enabled
 
-n8n's HTTP Request node does **not** include request/response metadata in execution output by default. To unlock these fields:
+n8n's HTTP Request node does **not** include request/response metadata by default. To unlock:
 
 | Field | Required setting |
 |---|---|
-| Response status code | Enable **"Include Response Headers and Status"** in the HTTP Request node |
+| Response status code | **"Include Response Headers and Status"** in node options |
 | Response headers | Same setting |
-| Request headers sent | Not available from execution data in current n8n versions |
-| Request body sent | Not available from execution data in current n8n versions |
+| Request headers actually sent | Not available in execution data — n8n does not store these server-side |
+| Actual resolved request body | Not available in execution data |
 
-To enable: open the HTTP Request node → Options tab → turn on **"Include Response in Output"** and **"Include Response Headers and Status"**.
+> **Honest note:** n8n's execution API stores workflow *results*, not full HTTP traces. Request headers and the exact runtime-resolved body are not accessible via the execution endpoint. The extension shows everything that is actually present and labels missing fields clearly — it never fabricates data.
 
-> **Honest note:** n8n's execution API was designed to store workflow *results*, not full HTTP debug traces. Request headers and the exact resolved request body are not stored server-side in a way the frontend can retrieve. The extension surfaces everything that is actually present in the execution data — it will never fabricate or guess values. Fields that aren't available are labelled clearly so you know what's missing and why.
+### Error responses (4xx/5xx)
 
-### Error responses
-
-When an HTTP Request node fails (network error, 4xx, 5xx):
-- The error message is shown in a red banner
-- If n8n stored the error response body (in `error.cause`), it is extracted and shown as "Error Response Body"
-- HTTP status codes from failed requests are surfaced when available
+When an HTTP Request node fails, n8n stores error details in `error.cause`. The extension extracts:
+- The HTTP status code and message
+- The error response body (from `error.cause.body`)
+- The error description
 
 ---
 
@@ -101,26 +137,33 @@ When an HTTP Request node fails (network error, 4xx, 5xx):
 ```
 n8n editor page
       │
-      │  fetch /rest/executions/{id}
+      │  fetch /rest/executions/{id}    ← also catches Executions tab history
       ▼
-  n8n REST API  ──→  execution JSON (serialized)
+  n8n REST API  →  execution JSON
       │
-      │  (intercepted by main-world.js content script)
+      │  intercepted by main-world.js (MAIN world content script)
+      │  patches window.fetch + XMLHttpRequest before n8n loads
       ▼
   CustomEvent dispatched on window
       │
-      │  (received by isolated content script)
+      │  received by content.js (isolated content script)
       ▼
-  parser.ts  ──→  decodes n8n's indexed serialization
-                  ──→  finds httpRequest nodes in runData
-                  ──→  extracts response/error/timing
+  parser.ts
+    ├── decodes n8n's indexed serialization (data field is a JSON string,
+    │   values reference each other by array index)
+    ├── navigates to resultData.runData
+    ├── filters for n8n-nodes-base.httpRequest nodes
+    └── extracts response/error/timing per run
       │
       ▼
-  panel-ui.ts  ──→  renders glassmorphism floating panel
-                    with syntax-highlighted JSON/XML
+  panel-ui.ts  →  glassmorphism floating panel
+  curl.ts      →  cURL command generation
+  diagnosis.ts →  error pattern matching + hints
+  diff.ts      →  two-run comparison engine
+  redaction.ts →  secret detection + in-place redaction
 ```
 
-n8n uses an internal indexed serialization format for execution data — the `data` field is a JSON string where values reference each other by array index to avoid repetition. The parser decodes this before extracting node results.
+The MAIN world content script (`main-world.content.ts`) runs at `document_start` so it patches `fetch` and `XHR` before n8n's own code loads. This avoids any CSP issues with inline script injection.
 
 ---
 
@@ -143,17 +186,11 @@ Output: `.output/chrome-mv3/`
 ### Load unpacked
 
 1. Open `chrome://extensions`
-2. Enable **Developer mode** (top-right toggle)
-3. Click **Load unpacked** → select `.output/chrome-mv3/`
-4. Hard-refresh any open n8n tab
+2. Enable **Developer mode** (top-right)
+3. **Load unpacked** → select `.output/chrome-mv3/`
+4. Hard-refresh any open n8n tab (`Cmd+Shift+R`)
 
-### Dev mode (hot reload)
-
-```bash
-npm run dev
-```
-
-Note: dev mode injects a WXT bootstrap script that n8n's CSP may block — use the production build for testing against a real n8n instance.
+> **Dev mode note:** `npm run dev` opens Chrome with hot-reload but n8n's CSP may block WXT's HMR bootstrap script. Use the production build for testing against a real n8n instance.
 
 ---
 
@@ -162,38 +199,40 @@ Note: dev mode injects a WXT bootstrap script that n8n's CSP may block — use t
 ```
 src/
 ├── entrypoints/
-│   ├── content.ts           # Isolated world — mounts panel, routes events to parser
-│   ├── main-world.content.ts # Main world — patches fetch + XHR to intercept API calls
-│   ├── background.ts        # Service worker — toolbar icon → opens settings
-│   └── settings.html        # Settings page — domain registration
-├── modules/
-│   ├── parser.ts            # Decodes n8n's serialized execution JSON → HttpNodeCall[]
-│   ├── panel-ui.ts          # Panel DOM, glassmorphism CSS, syntax highlighting
-│   ├── interceptor.ts       # (legacy, kept for reference)
-│   └── settings-page.ts     # Settings page script
-public/
-└── icons/
+│   ├── content.ts              # Isolated world — routes intercepted events to parser → panel
+│   ├── main-world.content.ts   # Main world — patches fetch + XHR (runs at document_start)
+│   ├── background.ts           # Service worker — toolbar icon → opens settings
+│   └── settings.html           # Settings page — domain registration UI
+└── modules/
+    ├── parser.ts               # Decodes n8n serialization → HttpNodeCall[]
+    ├── panel-ui.ts             # Floating panel, glassmorphism CSS, token syntax highlighting
+    ├── curl.ts                 # cURL command builder
+    ├── diagnosis.ts            # Error pattern matching → plain-English hints
+    ├── diff.ts                 # Two-run comparison engine
+    ├── redaction.ts            # Secret/token detection and redaction
+    ├── settings-page.ts        # Settings page script (domain management)
+    └── interceptor.ts          # (legacy reference, superseded by main-world.content.ts)
 ```
 
 ---
 
 ## Known limitations
 
-- **Request headers/body** are not available from n8n's execution API by default. The extension cannot show what was actually sent over the wire — only what n8n stored in the execution output.
-- **Expression-resolved URLs** — if your HTTP Request node URL uses an expression like `={{ $json.endpoint }}`, the extension cannot resolve the expression. It will show the static fallback from node parameters, or nothing.
-- **Large response bodies** — very large responses may be truncated by n8n before storage. The extension shows whatever n8n stored.
-- **n8n version compatibility** — tested against n8n's current execution JSON format (confirmed 2026-08-30). If n8n changes its internal serialization format, `parser.ts` may need updates.
-- **Self-hosted detection** — the extension uses URL patterns and page title to detect n8n pages. Unusual reverse-proxy setups may not be auto-detected — use the Settings page to manually register your domain.
+- **Request headers/body** — not available from n8n's execution API by default. The extension cannot show what was actually sent over the wire, only what n8n stored in execution output.
+- **Expression-resolved URLs** — if your URL uses `={{ $json.endpoint }}`, the extension cannot resolve the expression and will show the literal string or nothing.
+- **Large responses** — very large bodies may be truncated by n8n before storage. The extension shows whatever n8n kept.
+- **n8n version compatibility** — confirmed against n8n's execution format as of 2026-08-30. If n8n changes its internal serialization format, `parser.ts` may need updates.
+- **Self-hosted detection** — uses URL patterns and page title heuristics. Unusual reverse-proxy setups may not auto-detect — use the Settings page to register your domain manually.
+- **cURL accuracy** — the generated cURL command reflects captured data. If request headers/body weren't available in execution output, the command will be incomplete (clearly noted in a comment at the top of the command).
 
 ---
 
 ## Roadmap
 
 - [ ] Export to Postman collection format
-- [ ] Diff two executions side by side
-- [ ] Support for other node types (GraphQL, Webhook)
 - [ ] Firefox support
-- [ ] Request headers via devtools panel API (as an alternative to execution data)
+- [ ] Support for other node types (GraphQL, Webhook response)
+- [ ] Request header capture via `chrome.devtools.network` API (alternative to execution data)
 
 ---
 
