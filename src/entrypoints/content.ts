@@ -17,8 +17,6 @@ export default defineContentScript({
       if (!isN8nPage()) return;
     }
 
-    console.debug("[n8n HTTP Inspector] n8n detected — mounting panel.");
-
     const panel = new InspectorPanel();
     panel.mount();
 

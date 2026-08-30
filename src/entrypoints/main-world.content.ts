@@ -98,6 +98,5 @@ export default defineContentScript({
       return (_origSend as Function).apply(this, args);
     };
 
-    console.debug("[n8n HTTP Inspector] Main-world interceptor active — fetch + XHR patched.");
   },
 });
