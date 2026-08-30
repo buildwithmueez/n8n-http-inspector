@@ -10,6 +10,10 @@
  */
 
 import type { HttpNodeCall } from "./parser";
+import { buildCurlCommand } from "./curl";
+import { diagnose } from "./diagnosis";
+import { scanHeaders, scanBody, redactHeaders, redactString, type RedactionFinding } from "./redaction";
+import { diffCalls, type CallDiff } from "./diff";
 
 const PANEL_ID = "n8n-http-inspector-panel";
 const TOGGLE_BTN_ID = "n8n-http-inspector-toggle";
@@ -18,6 +22,9 @@ const STORAGE_KEY_POS = "n8n_inspector_pos";
 let allCalls: Array<HttpNodeCall & { execId: number }> = [];
 let execCounter = 0;
 let searchQuery = "";
+// Diff: stores the two call indices selected for comparison (indices into allCalls)
+let diffSelection: [number, number] | null = null;
+let diffMode = false;
 
 export class InspectorPanel {
   private panel: HTMLElement | null = null;
@@ -26,6 +33,7 @@ export class InspectorPanel {
   private statusEl: HTMLElement | null = null;
   private searchInput: HTMLInputElement | null = null;
   private countEl: HTMLElement | null = null;
+  private diffContainer: HTMLElement | null = null;
   private isVisible = true;
 
   private isDragging = false;
@@ -70,7 +78,10 @@ export class InspectorPanel {
   clearAllCalls() {
     allCalls = [];
     execCounter = 0;
+    diffSelection = null;
+    diffMode = false;
     if (this.callList) this.callList.innerHTML = "";
+    if (this.diffContainer) { this.diffContainer.innerHTML = ""; this.diffContainer.hidden = true; }
     if (this.searchInput) { this.searchInput.value = ""; searchQuery = ""; }
     this.updateCount();
     this.showStatus("idle");
@@ -120,6 +131,10 @@ export class InspectorPanel {
       this.callList!.appendChild(this.buildCallCard(call, filtered.length - 1 - idx))
     );
     this.updateCount();
+    // In diff mode, show all diff checkboxes
+    if (diffMode) {
+      this.callList!.querySelectorAll<HTMLElement>(".ni-diff-row").forEach((el) => { el.hidden = false; });
+    }
   }
 
   private updateCount() {
@@ -193,13 +208,20 @@ export class InspectorPanel {
     );
     clearBtn.addEventListener("click", () => this.clearAllCalls());
 
+    const diffToggleBtn = this.iconBtn(
+      `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="14" y2="12"></line><line x1="4" y1="18" x2="18" y2="18"></line><polyline points="17 9 20 12 17 15"></polyline></svg>`,
+      "Compare two runs (Diff mode)"
+    );
+    diffToggleBtn.id = "ni-diff-toggle-btn";
+    diffToggleBtn.addEventListener("click", () => this.toggleDiffMode(diffToggleBtn));
+
     const closeBtn = this.iconBtn(
       `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`,
       "Close (Alt+H)"
     );
     closeBtn.addEventListener("click", () => this.closePanel());
 
-    hRight.append(clearBtn, closeBtn);
+    hRight.append(diffToggleBtn, clearBtn, closeBtn);
     header.append(title, this.countEl, hRight);
 
     // Search bar
@@ -239,12 +261,18 @@ export class InspectorPanel {
     const statusEl = document.createElement("p");
     statusEl.className = "ni-status";
 
-    panel.append(header, searchBar, statusEl, callList);
+    // Diff container (hidden until diff mode active)
+    const diffContainer = document.createElement("div");
+    diffContainer.className = "ni-diff-container";
+    diffContainer.hidden = true;
+
+    panel.append(header, searchBar, statusEl, callList, diffContainer);
     document.body.appendChild(panel);
 
     this.panel = panel;
     this.callList = callList;
     this.statusEl = statusEl;
+    this.diffContainer = diffContainer;
 
     document.addEventListener("mousemove", (e) => this.onMouseMove(e));
     document.addEventListener("mouseup", () => this.onMouseUp());
@@ -333,6 +361,20 @@ export class InspectorPanel {
     details.hidden = true;
     this.populateCallDetails(details, call);
 
+    // ── Diff checkbox (shown in diff mode) ──
+    const diffRow = document.createElement("div");
+    diffRow.className = "ni-diff-row";
+    diffRow.hidden = !diffMode;
+    const diffCb = document.createElement("input");
+    diffCb.type = "checkbox";
+    diffCb.className = "ni-diff-cb";
+    diffCb.setAttribute("aria-label", `Select run #${call.execId} for diff`);
+    const diffLbl = document.createElement("label");
+    diffLbl.className = "ni-diff-lbl";
+    diffLbl.textContent = `Select for diff (#${call.execId})`;
+    diffRow.append(diffCb, diffLbl);
+    diffCb.addEventListener("change", () => this.handleDiffSelect(allCalls.indexOf(call), diffCb.checked));
+
     hBtn.addEventListener("click", () => {
       const nowOpen = hBtn.getAttribute("aria-expanded") !== "true";
       hBtn.setAttribute("aria-expanded", String(nowOpen));
@@ -340,12 +382,91 @@ export class InspectorPanel {
       card.classList.toggle("ni-card--open", nowOpen);
     });
 
-    card.append(hBtn, details);
+    card.append(hBtn, diffRow, details);
     return card;
   }
 
   private populateCallDetails(container: HTMLElement, call: HttpNodeCall) {
-    // URL row
+    // ── cURL button row ────────────────────────────────────────────────────
+    const curlBar = document.createElement("div");
+    curlBar.className = "ni-action-bar";
+    const curlBtn = document.createElement("button");
+    curlBtn.className = "ni-action-btn";
+    curlBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg> Copy as cURL`;
+    curlBtn.addEventListener("click", () => {
+      const cmd = buildCurlCommand(call);
+      navigator.clipboard.writeText(cmd).then(() => {
+        curlBtn.textContent = "✓ Copied!";
+        setTimeout(() => {
+          curlBtn.innerHTML = `<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg> Copy as cURL`;
+        }, 2000);
+      });
+    });
+    curlBar.appendChild(curlBtn);
+    container.appendChild(curlBar);
+
+    // ── Diagnosis hint ─────────────────────────────────────────────────────
+    const diagnosis = diagnose(call);
+    if (diagnosis) {
+      const hint = document.createElement("div");
+      hint.className = `ni-diagnosis ni-diagnosis--${diagnosis.severity}`;
+      hint.innerHTML = `
+        <div class="ni-diagnosis-header">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+          <strong>${escapeHtml(diagnosis.label)}</strong>
+        </div>
+        <p class="ni-diagnosis-hint">${escapeHtml(diagnosis.hint)}</p>
+        <p class="ni-diagnosis-fix"><span class="ni-diagnosis-fix-label">Fix →</span> ${escapeHtml(diagnosis.fix)}</p>`;
+      container.appendChild(hint);
+    }
+
+    // ── Secrets warning ────────────────────────────────────────────────────
+    const secretFindings: RedactionFinding[] = [];
+    if (call.requestHeaders) secretFindings.push(...scanHeaders(call.requestHeaders, "Request Headers"));
+    if (call.responseHeaders) secretFindings.push(...scanHeaders(call.responseHeaders, "Response Headers"));
+    const bodyStr = call.responseBody != null
+      ? (typeof call.responseBody === "string" ? call.responseBody : JSON.stringify(call.responseBody))
+      : null;
+    if (bodyStr) secretFindings.push(...scanBody(bodyStr, "Response Body"));
+
+    if (secretFindings.length > 0) {
+      const warn = document.createElement("div");
+      warn.className = "ni-secret-warn";
+      let redacted = false;
+      warn.innerHTML = `
+        <div class="ni-secret-header">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          <strong>${secretFindings.length} possible secret${secretFindings.length > 1 ? "s" : ""} detected</strong>
+          <span class="ni-secret-hint">Safe to share?</span>
+        </div>
+        <ul class="ni-secret-list">${secretFindings.map(f =>
+          `<li><span class="ni-secret-type">${escapeHtml(f.type)}</span> in <span class="ni-secret-loc">${escapeHtml(f.location)}</span> — <code>${escapeHtml(f.preview)}</code></li>`
+        ).join("")}</ul>`;
+
+      const redactBtn = document.createElement("button");
+      redactBtn.className = "ni-action-btn ni-action-btn--warn";
+      redactBtn.textContent = "Redact secrets in view";
+      redactBtn.addEventListener("click", () => {
+        if (redacted) return;
+        redacted = true;
+        redactBtn.textContent = "✓ Redacted";
+        redactBtn.disabled = true;
+        // Replace header values in the rendered header sections
+        container.querySelectorAll<HTMLElement>(".ni-hn").forEach((el) => {
+          const nameEl = el as HTMLElement;
+          const valEl = nameEl.nextElementSibling as HTMLElement | null;
+          if (!valEl) return;
+          const name = nameEl.textContent ?? "";
+          const val = valEl.textContent ?? "";
+          const redactedVal = redactString(val);
+          if (redactedVal !== val) valEl.textContent = redactedVal;
+        });
+      });
+      warn.appendChild(redactBtn);
+      container.appendChild(warn);
+    }
+
+    // ── URL row ────────────────────────────────────────────────────────────
     const urlVal = document.createElement("span");
     if (call.url) {
       urlVal.className = "ni-mono ni-url";
@@ -356,7 +477,7 @@ export class InspectorPanel {
     }
     container.appendChild(this.fieldRowEl("URL", urlVal, call.url ?? undefined));
 
-    // Error banner
+    // ── Error banner ───────────────────────────────────────────────────────
     if (call.error) {
       const banner = document.createElement("div");
       banner.className = "ni-error-banner";
@@ -368,7 +489,7 @@ export class InspectorPanel {
       container.appendChild(banner);
     }
 
-    // Status row
+    // ── Status row ─────────────────────────────────────────────────────────
     if (call.statusCode != null) {
       const sv = document.createElement("span");
       sv.className = `ni-mono ${call.statusCode >= 400 ? "ni-err" : "ni-ok"}`;
@@ -381,7 +502,7 @@ export class InspectorPanel {
       container.appendChild(this.fieldRowEl("Status", sv));
     }
 
-    // Timing row
+    // ── Timing row ─────────────────────────────────────────────────────────
     const timeParts: string[] = [];
     if (call.startTime != null) timeParts.push(`Started: ${new Date(call.startTime).toLocaleTimeString()}`);
     if (call.executionTimeMs != null) timeParts.push(`${call.executionTimeMs}ms`);
@@ -393,7 +514,7 @@ export class InspectorPanel {
       container.appendChild(this.fieldRowEl("Timing", tv));
     }
 
-    // Collapsible sections
+    // ── Collapsible sections ───────────────────────────────────────────────
     if (call.requestHeaders) {
       container.appendChild(this.sectionEl("Request Headers", formatHeadersEl(call.requestHeaders), JSON.stringify(call.requestHeaders, null, 2), true));
     }
@@ -404,11 +525,8 @@ export class InspectorPanel {
       container.appendChild(this.sectionEl("Response Headers", formatHeadersEl(call.responseHeaders), JSON.stringify(call.responseHeaders, null, 2), true));
     }
 
-    const body = call.responseBody != null
-      ? (typeof call.responseBody === "string" ? call.responseBody : JSON.stringify(call.responseBody, null, 2))
-      : null;
-    if (body) {
-      container.appendChild(this.sectionEl("Response Body", highlightCodeEl(body), body));
+    if (bodyStr) {
+      container.appendChild(this.sectionEl("Response Body", highlightCodeEl(bodyStr), bodyStr));
     } else if (!call.error) {
       const naEl = document.createElement("span");
       naEl.className = "ni-na";
@@ -416,7 +534,6 @@ export class InspectorPanel {
       container.appendChild(this.sectionEl("Response Body", naEl));
     }
 
-    // Error detail body
     if (call.errorDetail) {
       const cause = call.errorDetail.cause as Record<string, unknown> | undefined;
       if (cause?.body) {
@@ -531,6 +648,107 @@ export class InspectorPanel {
     this.panel.style.display = "none";
     this.toggleBtn?.classList.remove("ni-toggle--active");
     this.isVisible = false;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Diff mode
+  // ---------------------------------------------------------------------------
+
+  private toggleDiffMode(btn: HTMLButtonElement) {
+    diffMode = !diffMode;
+    diffSelection = null;
+    btn.classList.toggle("ni-icon-btn--active", diffMode);
+    btn.title = diffMode ? "Exit diff mode" : "Compare two runs (Diff mode)";
+    if (this.diffContainer) {
+      this.diffContainer.innerHTML = "";
+      this.diffContainer.hidden = true;
+    }
+    this.rerender();
+  }
+
+  private handleDiffSelect(idx: number, checked: boolean) {
+    if (!diffMode) return;
+
+    if (checked) {
+      if (!diffSelection) {
+        diffSelection = [idx, -1];
+      } else if (diffSelection[1] === -1) {
+        diffSelection[1] = idx;
+        // Both selected — render diff
+        this.renderDiff(diffSelection[0], diffSelection[1]);
+      } else {
+        // Already have two — replace the older one
+        diffSelection = [diffSelection[1], idx];
+        this.renderDiff(diffSelection[0], diffSelection[1]);
+      }
+    } else {
+      // Deselect
+      if (diffSelection) {
+        if (diffSelection[0] === idx) diffSelection[0] = -1;
+        if (diffSelection[1] === idx) diffSelection[1] = -1;
+        if (diffSelection[0] === -1 && diffSelection[1] === -1) diffSelection = null;
+      }
+      if (this.diffContainer) {
+        this.diffContainer.innerHTML = "";
+        this.diffContainer.hidden = true;
+      }
+    }
+  }
+
+  private renderDiff(idxA: number, idxB: number) {
+    if (!this.diffContainer) return;
+    const a = allCalls[idxA];
+    const b = allCalls[idxB];
+    if (!a || !b) return;
+
+    const result = diffCalls(a, b);
+    this.diffContainer.hidden = false;
+    this.diffContainer.innerHTML = "";
+
+    // Header
+    const dh = document.createElement("div");
+    dh.className = "ni-diff-header";
+    dh.innerHTML = `
+      <span class="ni-diff-title">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"></line><line x1="4" y1="12" x2="14" y2="12"></line><line x1="4" y1="18" x2="18" y2="18"></line><polyline points="17 9 20 12 17 15"></polyline></svg>
+        Diff: <em>#${result.execIdA}</em> vs <em>#${result.execIdB}</em>
+        ${result.identical ? '<span class="ni-diff-identical">Identical</span>' : ''}
+      </span>
+      <div class="ni-diff-col-labels">
+        <span class="ni-diff-col-a">Run #${result.execIdA}</span>
+        <span class="ni-diff-col-b">Run #${result.execIdB}</span>
+      </div>`;
+    this.diffContainer.appendChild(dh);
+
+    // Rows
+    for (const field of result.fields) {
+      const row = document.createElement("div");
+      row.className = `ni-diff-row-data ni-diff-${field.status}`;
+
+      const label = document.createElement("div");
+      label.className = "ni-diff-label";
+      label.textContent = field.label;
+
+      const left = document.createElement("div");
+      left.className = "ni-diff-cell ni-diff-cell--a";
+      const leftPre = document.createElement("pre");
+      leftPre.className = "ni-diff-val";
+      leftPre.textContent = field.left || "(empty)";
+      left.appendChild(leftPre);
+
+      const right = document.createElement("div");
+      right.className = "ni-diff-cell ni-diff-cell--b";
+      const rightPre = document.createElement("pre");
+      rightPre.className = "ni-diff-val";
+      rightPre.textContent = field.right || "(empty)";
+      right.appendChild(rightPre);
+
+      row.append(label, left, right);
+      this.diffContainer.appendChild(row);
+    }
+
+    // Scroll into view
+    this.diffContainer.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   // ---------------------------------------------------------------------------
@@ -1331,5 +1549,223 @@ const CSS = `
 #n8n-http-inspector-toggle:focus-visible {
   outline: 2px solid #ff6d5a;
   outline-offset: 3px;
+}
+
+/* ── Action bar (cURL button row) ── */
+.ni-action-bar {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 2px;
+}
+.ni-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 3px 9px;
+  background: rgba(147,197,253,0.1);
+  border: 1px solid rgba(147,197,253,0.2);
+  border-radius: 5px;
+  color: #93c5fd;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.ni-action-btn:hover {
+  background: rgba(147,197,253,0.18);
+  color: #bfdbfe;
+}
+.ni-action-btn--warn {
+  background: rgba(251,191,36,0.08);
+  border-color: rgba(251,191,36,0.2);
+  color: #fbbf24;
+}
+.ni-action-btn--warn:hover { background: rgba(251,191,36,0.15); }
+
+/* ── Diagnosis hint ── */
+.ni-diagnosis {
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ni-diagnosis--error {
+  background: rgba(248,113,113,0.07);
+  border: 1px solid rgba(248,113,113,0.2);
+}
+.ni-diagnosis--warn {
+  background: rgba(251,191,36,0.07);
+  border: 1px solid rgba(251,191,36,0.2);
+}
+.ni-diagnosis--info {
+  background: rgba(96,165,250,0.07);
+  border: 1px solid rgba(96,165,250,0.2);
+}
+.ni-diagnosis-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+}
+.ni-diagnosis--error .ni-diagnosis-header { color: #f87171; }
+.ni-diagnosis--warn  .ni-diagnosis-header { color: #fbbf24; }
+.ni-diagnosis--info  .ni-diagnosis-header { color: #60a5fa; }
+.ni-diagnosis-hint { color: rgba(255,255,255,0.6); margin: 0; }
+.ni-diagnosis-fix { color: rgba(255,255,255,0.5); margin: 0; font-size: 10px; }
+.ni-diagnosis-fix-label { font-weight: 700; color: rgba(255,255,255,0.4); }
+
+/* ── Secret warning ── */
+.ni-secret-warn {
+  background: rgba(251,191,36,0.06);
+  border: 1px solid rgba(251,191,36,0.22);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+}
+.ni-secret-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #fbbf24;
+  font-weight: 700;
+}
+.ni-secret-hint {
+  margin-left: auto;
+  font-size: 9px;
+  color: rgba(251,191,36,0.5);
+  font-weight: 400;
+}
+.ni-secret-list {
+  margin: 0;
+  padding: 0 0 0 14px;
+  color: rgba(255,255,255,0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ni-secret-type { color: #fbbf24; font-weight: 600; }
+.ni-secret-loc { color: rgba(255,255,255,0.4); }
+.ni-secret-list code {
+  font-family: "SF Mono","Fira Code",monospace;
+  font-size: 10px;
+  color: rgba(255,255,255,0.4);
+}
+
+/* ── Diff mode ── */
+.ni-icon-btn--active {
+  color: #ff6d5a !important;
+  background: rgba(255,109,90,0.1) !important;
+}
+
+.ni-diff-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(255,109,90,0.04);
+  border-top: 1px solid rgba(255,255,255,0.04);
+  font-size: 11px;
+  color: rgba(255,255,255,0.4);
+}
+.ni-diff-row[hidden] { display: none !important; }
+.ni-diff-cb { accent-color: #ff6d5a; cursor: pointer; }
+.ni-diff-lbl { cursor: pointer; }
+
+.ni-diff-container {
+  border-top: 2px solid rgba(255,109,90,0.3);
+  overflow-y: auto;
+  max-height: 50%;
+  flex-shrink: 0;
+}
+.ni-diff-container[hidden] { display: none !important; }
+
+.ni-diff-header {
+  padding: 8px 10px 6px;
+  background: rgba(255,109,90,0.06);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.ni-diff-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #ff6d5a;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ni-diff-title em { font-style: normal; color: rgba(255,255,255,0.7); }
+.ni-diff-identical {
+  font-size: 9px;
+  background: rgba(74,222,128,0.15);
+  border: 1px solid rgba(74,222,128,0.25);
+  color: #4ade80;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-weight: 600;
+}
+.ni-diff-col-labels {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr;
+  gap: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.ni-diff-col-a { color: rgba(147,197,253,0.7); }
+.ni-diff-col-b { color: rgba(196,181,253,0.7); }
+
+.ni-diff-row-data {
+  display: grid;
+  grid-template-columns: 80px 1fr 1fr;
+  gap: 4px;
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-size: 11px;
+  align-items: start;
+}
+.ni-diff-row-data:last-child { border-bottom: none; }
+.ni-diff-unchanged { opacity: 0.4; }
+.ni-diff-changed { background: rgba(251,191,36,0.04); }
+.ni-diff-added   { background: rgba(74,222,128,0.04); }
+.ni-diff-removed { background: rgba(248,113,113,0.04); }
+
+.ni-diff-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: rgba(255,255,255,0.3);
+  padding-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ni-diff-cell { overflow: hidden; }
+.ni-diff-cell--a .ni-diff-val { color: #93c5fd; }
+.ni-diff-cell--b .ni-diff-val { color: #c4b5fd; }
+.ni-diff-val {
+  margin: 0;
+  font-family: "SF Mono","Fira Code",monospace;
+  font-size: 10px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+  max-height: 120px;
+  overflow-y: auto;
 }
 `;
