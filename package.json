@@ -1,0 +1,15 @@
+{
+  "name": "n8n-http-inspector",
+  "version": "0.1.0",
+  "description": "Chrome extension that surfaces HTTP Request node details from n8n workflow executions",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "postinstall": "wxt prepare"
+  },
+  "devDependencies": {
+    "wxt": "^0.20.0",
+    "typescript": "^5.5.0"
+  }
+}
