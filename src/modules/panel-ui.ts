@@ -127,9 +127,11 @@ export class InspectorPanel {
     }
 
     this.showStatus("hidden");
-    [...filtered].reverse().forEach((call, idx) =>
-      this.callList!.appendChild(this.buildCallCard(call, filtered.length - 1 - idx))
-    );
+    [...filtered].reverse().forEach((call, _renderedIdx) => {
+      // Pass the stable allCalls index so diff selection works correctly
+      const callIdx = allCalls.indexOf(call);
+      this.callList!.appendChild(this.buildCallCard(call, callIdx));
+    });
     this.updateCount();
     // In diff mode, show all diff checkboxes
     if (diffMode) {

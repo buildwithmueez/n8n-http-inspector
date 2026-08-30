@@ -1,5 +1,36 @@
 # n8n HTTP Inspector
 
+
+<!-- TOC-START -->
+
+## 📋 Table of Contents
+
+- [Why this exists](#why-this-exists)
+- [Features](#features)
+  - [Core](#core)
+  - [v2 Features](#v2-features)
+- [Setup](#setup)
+  - [n8n Cloud (`*.app.n8n.cloud`)](#n8n-cloud-appn8ncloud)
+  - [Self-hosted n8n](#self-hosted-n8n)
+- [Usage](#usage)
+  - [Panel controls](#panel-controls)
+- [What data is available](#what-data-is-available)
+  - [Always available](#always-available)
+  - [Available from static node parameters](#available-from-static-node-parameters)
+  - [Requires node settings to be enabled](#requires-node-settings-to-be-enabled)
+  - [Error responses (4xx/5xx)](#error-responses-4xx5xx)
+- [How it works](#how-it-works)
+- [Installation (development)](#installation-development)
+  - [Prerequisites](#prerequisites)
+  - [Build](#build)
+  - [Load unpacked](#load-unpacked)
+- [Project structure](#project-structure)
+- [Known limitations](#known-limitations)
+- [Roadmap](#roadmap)
+- [License](#license)
+
+<!-- TOC-END -->
+
 A Chrome extension that surfaces HTTP Request node call details directly inside the n8n editor — request method, URL, headers, body, response status, response body, execution timing, and more. All the stuff n8n's built-in UI buries or omits.
 
 **Current version:** 2.0.0
