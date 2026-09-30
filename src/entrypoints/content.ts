@@ -82,6 +82,22 @@ function isN8nPage(): boolean {
     return true;
   }
 
+  // ── Broader fallbacks for self-hosted / embedded instances ───────────────
+
+  // Any page whose URL path contains /workflow/ or /workflows — n8n's SPA
+  // routes all workflow editing under these paths
+  if (/\/workflows?(\/|$)/.test(location.pathname)) return true;
+
+  // n8n's #app div is always present in the editor, even when data-n8n isn't set.
+  // Pair it with a path check to avoid false-positives on unrelated Vue apps.
+  if (appEl && /\/(workflow|executions?|credentials?|variables|tags)(\/|$)/.test(location.pathname)) return true;
+
+  // n8n uses __vue_app__ on its root DOM element (Vue 3 internals)
+  if (appEl && "__vue_app__" in appEl) return true;
+
+  // n8n injects a <title> containing "n8n" (editor and self-hosted instances)
+  if (document.title.toLowerCase().includes("n8n")) return true;
+
   return false;
 }
 
